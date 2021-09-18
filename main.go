@@ -3,7 +3,6 @@ package main
 import (
     "os"
     "fmt"
-    "sync"
     "time"
     "sort"
     "bytes"
@@ -11,7 +10,6 @@ import (
 
     "io/fs"
     "path/filepath"
-    "encoding/json"
 
     "github.com/fatih/color"
 	"tinygo.org/x/bluetooth"
@@ -23,90 +21,6 @@ type StoredDevice struct {
     LocalName string
     CustomName string
     Seen int
-}
-
-type App struct {
-    adapter *bluetooth.Adapter
-    discovered chan bluetooth.ScanResult
-    db map[string][]string
-    seen map[string]*StoredDevice
-    notSeen map[string]*StoredDevice
-    sync.RWMutex
-}
-
-func (app *App) see(uid string, sd *StoredDevice) {
-    app.Lock()
-    defer app.Unlock()
-    delete(app.notSeen, uid)
-    app.seen[uid] = sd
-}
-
-func (app *App) unsee(uid string, sd *StoredDevice) {
-    app.Lock()
-    defer app.Unlock()
-    delete(app.seen, uid)
-    app.notSeen[uid] = sd
-}
-
-func (app *App) logic() {
-    for {
-        select {
-        case device := <- app.discovered:
-
-            uid := device.Address.String()
-
-            sd := &StoredDevice{
-                UID: uid,
-                CustomName: "?",
-                LocalName: device.LocalName(),
-            }
-
-            if len(sd.LocalName) > 0 {
-                println("skip device:", uid, device.RSSI, device.LocalName(), device.Address.String())
-                b, err := json.Marshal(sd)
-                if err != nil {
-                    panic(err)
-                }
-                if err := os.WriteFile("./skipped/"+uid, b, 0666); err != nil {
-                    panic(err)
-                }
-                continue
-            }
-
-            b, err := os.ReadFile("./seen/"+uid)
-            if err == nil {
-                // open existing file
-                err := json.Unmarshal(b, sd)
-                if err != nil {
-                    panic(err)
-                }
-                sd.Seen++
-            } else {
-                println("found device:", uid, device.RSSI, device.LocalName(), device.Address.String())
-            }
-
-            // set correct time on the record
-            sd.LastSeen = time.Now().UTC()
-            d := time.Since(sd.LastSeen)
-            if d > (10 * time.Minute) {
-                println("THEY HAVE COME BACK TO US", d.String())
-            }
-
-            app.see(uid, sd)
-
-            // flush to file
-            b, err = json.Marshal(sd)
-            if err != nil {
-                panic(err)
-            }
-            if err := os.WriteFile("seen/"+uid, b, 0666); err != nil {
-                panic(err)
-            }
-
-        //case <- time.NewTicker(time.Second).C: println("ticker")
-
-        }
-    }
 }
 
 type DeviceTuple struct {
@@ -201,7 +115,7 @@ func (app *App) loadSeen(m map[string]struct{}) {
                 return err
             }
             sd := &StoredDevice{}
-            if err := json.Unmarshal(b, sd); err != nil {
+            if err := app.Unmarshal(b, sd); err != nil {
                 return err
             }
             uid := strings.Split(path, "/")[1]
@@ -233,14 +147,15 @@ func main() {
         seen: map[string]*StoredDevice{},
         notSeen: map[string]*StoredDevice{},
     }
-    //app.loadManufacturers()
-    go app.checkSeen()
-    go app.logic()
+    app.loadManufacturers()
 
 	// Enable BLE interface.
 	if err := app.adapter.Enable(); err != nil {
         panic(err)
     }
+
+    go app.checkSeen()
+    go app.logic()
 
     for {
         m := map[string]struct{}{}
